@@ -10,19 +10,11 @@ on:
     types: ['published']
   workflow_dispatch:
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
-
 jobs:
   build:
     strategy:
       matrix:
         include:
-          - os: macos-14
-            triplet: x64-osx-dynamic-release
-            deployment-target: "10.15"
-            osx-architecture: "x86_64"
           - os: macos-14
             triplet: arm64-osx-dynamic-release
             deployment-target: "11.0"
@@ -117,19 +109,17 @@ jobs:
                 -D QGIS_APP_NAME="QGIS-${{steps.workflow-artifact-ids.outputs.display-name}}" \
                 -D WITH_VCPKG=ON \
                 -D WITH_QTWEBENGINE=OFF \
-                -D WITH_BINDINGS=ON \
-                -D WITH_ORACLE=ON \
+                -D WITH_BINDINGS=OFF \
+                -D WITH_ORACLE=OFF \
+                -D WITH_HANA=ON \
                 -D WITH_GEOGRAPHICLIB=OFF \
-                -D WITH_SFCGAL=ON \
+                -D WITH_SFCGAL=OFF \
                 -D VCPKG_TARGET_TRIPLET="${{ matrix.triplet }}" \
                 -D VCPKG_HOST_TRIPLET="${{ matrix.triplet }}" \
                 -D VCPKG_INSTALL_OPTIONS="--only-binarycaching" \
                 -D CMAKE_OSX_DEPLOYMENT_TARGET=${{ matrix.deployment-target }} \
                 -D CMAKE_OSX_ARCHITECTURES=${{ matrix.osx-architecture }} \
-                -D ENABLE_UNITY_BUILDS=ON \
-                -D NUGET_USERNAME=${{ github.actor }} \
-                -D NUGET_SOURCE="https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json" \
-                -D NUGET_TOKEN=${{ secrets.GITHUB_TOKEN }} || true
+                -D ENABLE_UNITY_BUILDS=ON  || true
 
                 fdupes -q -r -1 build/vcpkg_installed/${{ matrix.triplet }}/lib | grep -E '\.(so|dylib)' | while read line; do master=""; for file in ${line[*]}; do if  [[ "x${master}" == "x" ]]; then master=$file; else rm "${file}"; ln -s $(basename "${master}") "${file}"; fi; done; done
 
@@ -162,90 +152,3 @@ jobs:
           # Ideally, we would specify each target that is required to be installed, but this workaround is sufficient for now
           cmake --build build
           cmake --build build --target bundle
-
-      - name: Archive app
-        run: |
-          gtar -cpvzf qgis-app-${{steps.workflow-artifact-ids.outputs.filename}}-${{ matrix.triplet }}.tar.gz ./build/_CPack_Packages/Darwin/External/*/*.app
-
-      - name: 📤 Upload app
-        uses: actions/upload-artifact@v6
-        with:
-          name: qgis-app-${{steps.workflow-artifact-ids.outputs.filename}}-${{ matrix.triplet }}
-          path: |
-            qgis-app-${{steps.workflow-artifact-ids.outputs.filename}}-${{ matrix.triplet }}.tar.gz
-
-  schedule_download_comment:
-    name: Create dmg
-    runs-on: macos-latest
-    needs: build
-    steps:
-      - name: 🐣 Checkout
-        uses: actions/checkout@v6
-
-      - name: 🔨 Prepare build env
-        run: |
-          brew install create-dmg
-
-
-      - name: 🎲 Get artifact ids
-        id: workflow-artifact-ids
-        uses: ./.github/actions/get-workflow-artifact-ids
-
-      - name: 📤 Download app
-        uses: actions/download-artifact@v7
-        with:
-          pattern: qgis-app-${{steps.workflow-artifact-ids.outputs.filename}}-*
-          path: |
-            artifacts
-
-      - name: Create universal app
-        run: |
-          mkdir -p x64
-          gtar --strip-components=5 -zxf ./artifacts/qgis-app-${{steps.workflow-artifact-ids.outputs.filename}}-x64-osx-dynamic-release/qgis-app-${{steps.workflow-artifact-ids.outputs.filename}}-x64-osx-dynamic-release.tar.gz -C x64
-          mkdir -p arm64
-          gtar --strip-components=5 -zxf ./artifacts/qgis-app-${{steps.workflow-artifact-ids.outputs.filename}}-arm64-osx-dynamic-release/qgis-app-${{steps.workflow-artifact-ids.outputs.filename}}-arm64-osx-dynamic-release.tar.gz -C arm64
-
-          pip install lipomerge
-          lipomerge ./x64 ./arm64 universal
-
-      - name: Create dmg
-        run: |
-          QGIS_APP_NAME=QGIS-"${{steps.workflow-artifact-ids.outputs.display-name}}"
-          create-dmg --volname "${QGIS_APP_NAME} Installer" \
-            --hide-extension ${QGIS_APP_NAME}.app \
-            --volicon "$(pwd)/images/icons/mac/qgis.icns" \
-            --background "$(pwd)/platform/macos/installer_background.png" \
-            --window-pos 200 120 \
-            --window-size 512 320 \
-            --icon-size 100 \
-            --icon "${QGIS_APP_NAME}.app" 130 160 \
-            --app-drop-link 400 155 \
-            ${QGIS_APP_NAME}-Installer.dmg \
-            universal/*/*.app
-
-      - name: 📤 Upload app
-        uses: actions/upload-artifact@v6
-        id: artifact-mac-qt6
-        with:
-          name: qgis-${{steps.workflow-artifact-ids.outputs.filename}}-dmg
-          path: |
-            *.dmg
-
-      - name: Upload release assets
-        uses: AButler/upload-release-assets@v3.0
-        if: ${{ github.event_name == 'release' }}
-        with:
-          files: '*.dmg'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Schedule download comment
-        uses: ./.github/actions/post_sticky_comment
-        if: github.event_name == 'pull_request'
-        with:
-          marker: macos-qt6
-          body: |
-            ### 🍎 MacOS Qt6 builds
-            Download [MacOS Qt6 builds of this PR for testing](${{ steps.artifact-mac-qt6.outputs.artifact-url }}).
-            _This installer is not signed, `control`+click > `open` the app to avoid the warning_
-            *(Built from commit ${{ github.event.pull_request.head.sha }})*
-          pr: ${{ github.event.number }}
